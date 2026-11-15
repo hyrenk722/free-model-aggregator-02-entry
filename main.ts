@@ -429,7 +429,9 @@ function promptTextForUsage(api: string, body: any): string {
 }
 
 // Dial the ranked models in order until one answers. Returns the success or
-// the last non-retryable refusal. Retries only 429 / 5xx / network errors.
+// the last non-retryable refusal. Retries 403 (a model refusing this caller,
+// e.g. harness-gated models), 429, 5xx and network errors; any other 4xx is a
+// genuine request/auth refusal and stops the dial at once.
 async function dialRanked(
   ranked: ModelRow[],
   api: string,
@@ -451,7 +453,7 @@ async function dialRanked(
     const result = await callGateway(model.id, gwBody, timeoutMs);
     if (result.ok) return { model: model.id, result, failures };
     last = result;
-    const retryable = result.status === 429 || result.status >= 500;
+    const retryable = result.status === 403 || result.status === 429 || result.status >= 500;
     if (!retryable) return { model: null, result, failures };
     failures.push({ status: result.status, code: result.code, model: model.id });
   }
