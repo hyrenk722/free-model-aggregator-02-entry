@@ -2,7 +2,7 @@
 // Reads the brief at $MAKEFUN_PROMPT_FILE, serves OpenAI Chat Completions and
 // Anthropic Messages, dials every model on the gateway's Chat Completions route
 // ($OPENAI_BASE_URL/chat/completions), routes each prompt to the highest-rated
-// free model that meets its requirements, and fails over in rating order.
+// free model that meets its requirements, and fails over in audit-pinned order.
 // Deterministic: fixed timestamps/ids, no wall clock in any response, no
 // randomness. Only timers are used for timeouts and the /work poll loop.
 import http from "node:http";
@@ -116,9 +116,35 @@ function meetsRequirements(m: ModelRow, req: any): boolean {
   return true;
 }
 
-// Ranked candidates for a prompt: rating desc, id asc as the deterministic tie-break.
+// Routing audit 2026-11-16 (12 direct probes + live trial evidence):
+// - thinkingmachines/inkling-2-small:free 403s through the platform gateway
+//   (4 errored trial calls) and on the direct API: never dial it.
+// - nvidia/nemotron-3.5-lightning:free answers HTTP 200 with EMPTY content
+//   (finish=length) in plain/JSON/tools probes: never dial it.
+// - nvidia/nemotron-3-ultra-550b-a55b:free answers all three modes direct
+//   (plain 643ms vs super-vl 13767ms): first for plain/tools.
+// - nvidia/nemotron-3.5-super-vl:free is the only model proven through the
+//   gateway: first for JSON, second otherwise.
+// - cohere/north-mini-code:free answers all three modes direct, fastest
+//   (364/779/880ms): third.
+// Order is pinned for these three; anything else keeps rating order after.
+const GATEWAY_DEAD = new Set([
+  "openrouter/thinkingmachines/inkling-2-small:free",
+  "openrouter/nvidia/nemotron-3.5-lightning:free",
+]);
+const PINNED_ORDER = [
+  "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+  "openrouter/nvidia/nemotron-3.5-super-vl:free",
+  "openrouter/cohere/north-mini-code:free",
+];
+
+// Ranked candidates for a prompt: pinned audit order first, then rating desc,
+// id asc as the deterministic tie-break.
 function rankedModels(req: any): ModelRow[] {
-  return MODELS.filter((m) => meetsRequirements(m, req)).sort((a, b) => {
+  return MODELS.filter((m) => meetsRequirements(m, req) && !GATEWAY_DEAD.has(m.id)).sort((a, b) => {
+    const pa = PINNED_ORDER.indexOf(a.id);
+    const pb = PINNED_ORDER.indexOf(b.id);
+    if (pa !== -1 || pb !== -1) return (pa === -1 ? 99 : pa) - (pb === -1 ? 99 : pb);
     if (b.rating_milli !== a.rating_milli) return b.rating_milli - a.rating_milli;
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
